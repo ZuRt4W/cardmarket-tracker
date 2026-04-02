@@ -3,11 +3,7 @@ database/models.py
 Modèles SQLAlchemy — optimisés pour TimescaleDB (hypertable sur snapshot_date).
 """
 
-from datetime import date
-from sqlalchemy import (
-    Column, Integer, String, Float, Date,
-    ForeignKey, UniqueConstraint, create_engine
-)
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -29,6 +25,11 @@ class Product(Base):
     id = Column(Integer, primary_key=True)
     expansion_id = Column(Integer, ForeignKey("expansions.id"), nullable=False)
     name = Column(String(200), nullable=False)
+
+    # ID natif Cardmarket — permet d'appeler GET /products/{cm_product_id}/articles
+    # directement en mode exploitation, sans re-scanner les 527 extensions
+    cm_product_id = Column(Integer, nullable=False, unique=True)
+
     expansion = relationship("Expansion", back_populates="products")
     price_snapshots = relationship("PriceSnapshot", back_populates="product")
 
@@ -46,7 +47,7 @@ class PriceSnapshot(Base):
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     snapshot_date = Column(Date, nullable=False, index=True)
-    language = Column(String(5), nullable=False)   # ex: "fr", "en", "de"
+    language = Column(String(5), nullable=False)
     price_min = Column(Float, nullable=False)
     price_max = Column(Float, nullable=False)
     price_avg = Column(Float, nullable=False)
@@ -54,6 +55,4 @@ class PriceSnapshot(Base):
 
     product = relationship("Product", back_populates="price_snapshots")
 
-    __table_args__ = (
-        UniqueConstraint("product_id", "snapshot_date", "language"),
-    )
+    __table_args__ = (UniqueConstraint("product_id", "snapshot_date", "language"),)

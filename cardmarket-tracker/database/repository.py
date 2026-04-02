@@ -1,10 +1,16 @@
 """
 database/repository.py
-Couche d'accès aux données — insertion et lecture des snapshots de prix.
+Couche d'accès aux données.
+
+Deux responsabilités principales :
+  1. register_product()     — mémorise un product_id Cardmarket (mode découverte)
+  2. get_all_known_products() — liste les produits connus (mode exploitation)
+  3. save_price_snapshot()  — persiste les prix agrégés du jour
+  4. has_known_products()   — indique si la base est déjà peuplée
 """
 
 from datetime import date
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session
 from database.models import Base, Expansion, Product, PriceSnapshot
 from config import settings
@@ -14,16 +20,22 @@ class PriceRepository:
     def __init__(self):
         self.engine = create_engine(settings.database_url)
 
-    def save_price_snapshot(
+    # ─────────────────────────────────────────
+    # Mode découverte
+    # ─────────────────────────────────────────
+
+    def register_product(
         self,
         expansion_name: str,
         product_name: str,
-        snapshot_date: date,
-        aggregated_prices: dict[str, dict],
-    ):
-        """Persiste les prix agrégés. Upsert par (product, date, langue)."""
+        cm_product_id: int,
+    ) -> Product:
+        """
+        Enregistre un produit Cardmarket en base.
+        Idempotent — si le produit existe déjà, retourne l'existant.
+        Permet au mode exploitation d'utiliser cm_product_id directement.
+        """
         with Session(self.engine) as session:
-            # Upsert expansion
             expansion = session.scalar(
                 select(Expansion).where(Expansion.name == expansion_name)
             )
@@ -32,7 +44,68 @@ class PriceRepository:
                 session.add(expansion)
                 session.flush()
 
-            # Upsert product
+            product = session.scalar(
+                select(Product).where(Product.cm_product_id == cm_product_id)
+            )
+            if not product:
+                product = Product(
+                    expansion_id=expansion.id,
+                    name=product_name,
+                    cm_product_id=cm_product_id,
+                )
+                session.add(product)
+                session.commit()
+
+            return product
+
+    # ─────────────────────────────────────────
+    # Mode exploitation
+    # ─────────────────────────────────────────
+
+    def has_known_products(self) -> bool:
+        """Retourne True si la base contient au moins un produit connu."""
+        with Session(self.engine) as session:
+            count = session.scalar(select(func.count()).select_from(Product))
+            return (count or 0) > 0
+
+    def get_all_known_products(self) -> list[Product]:
+        """
+        Retourne tous les produits enregistrés lors de la découverte,
+        avec leur expansion chargée (eager load pour éviter les N+1).
+        """
+        with Session(self.engine) as session:
+            products = session.scalars(
+                select(Product).join(Product.expansion)
+            ).all()
+            # Détache les objets de la session pour usage hors contexte
+            for p in products:
+                _ = p.expansion.name
+            return products
+
+    # ─────────────────────────────────────────
+    # Snapshots (commun aux deux modes)
+    # ─────────────────────────────────────────
+
+    def save_price_snapshot(
+        self,
+        expansion_name: str,
+        product_name: str,
+        snapshot_date: date,
+        aggregated_prices: dict[str, dict],
+    ):
+        """
+        Persiste les prix agrégés du jour.
+        Upsert par (product, date, langue) — idempotent.
+        """
+        with Session(self.engine) as session:
+            expansion = session.scalar(
+                select(Expansion).where(Expansion.name == expansion_name)
+            )
+            if not expansion:
+                expansion = Expansion(name=expansion_name)
+                session.add(expansion)
+                session.flush()
+
             product = session.scalar(
                 select(Product).where(
                     Product.expansion_id == expansion.id,
@@ -40,11 +113,8 @@ class PriceRepository:
                 )
             )
             if not product:
-                product = Product(expansion_id=expansion.id, name=product_name)
-                session.add(product)
-                session.flush()
+                return  # Produit non enregistré — ne devrait pas arriver
 
-            # Upsert snapshots par langue
             for lang, prices in aggregated_prices.items():
                 snapshot = session.scalar(
                     select(PriceSnapshot).where(

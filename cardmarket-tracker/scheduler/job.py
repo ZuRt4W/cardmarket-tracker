@@ -1,6 +1,8 @@
 """
 scheduler/job.py
-Planification quotidienne de la collecte via APScheduler.
+Planification quotidienne — mode exploitation uniquement.
+Le mode découverte se déclenche automatiquement si la base est vide,
+ou manuellement via scripts/run_discovery.py.
 """
 
 import logging
@@ -14,23 +16,18 @@ logger = logging.getLogger(__name__)
 scheduler = BlockingScheduler()
 
 
-@scheduler.scheduled_job(
-    "cron",
-    hour=settings.collect_hour,
-    minute=settings.collect_minute,
-    id="daily_collection",
-)
-def daily_collection():
-    logger.info("Démarrage de la collecte planifiée")
-    try:
-        count = run_collection()
-        logger.info(f"Collecte réussie — {count} snapshots")
-    except Exception as e:
-        logger.error(f"Erreur lors de la collecte : {e}")
+@scheduler.scheduled_job("cron", hour=settings.collect_hour,     minute=settings.collect_minute, id="morning_run")
+def morning_run():
+    logger.info("Cycle matin")
+    run_collection()
+
+
+@scheduler.scheduled_job("cron", hour=settings.collect_hour + 12, minute=settings.collect_minute, id="evening_run")
+def evening_run():
+    logger.info("Cycle soir")
+    run_collection()
 
 
 if __name__ == "__main__":
-    logger.info(
-        f"Scheduler démarré — collecte quotidienne à {settings.collect_hour:02d}:{settings.collect_minute:02d}"
-    )
+    logger.info("Scheduler démarré — 2 cycles quotidiens (matin + soir)")
     scheduler.start()

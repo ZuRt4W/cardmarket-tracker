@@ -1,7 +1,14 @@
 """
 collector/client.py
-Gestion des appels à l'API Cardmarket avec OAuth 1.0a,
-retry exponentiel et journalisation.
+
+Gestion des appels à l'API Cardmarket avec OAuth 1.0a.
+Hiérarchie ciblée :
+  Jeu : Pokémon (idGame=3)
+    └── Catégories : Booster Box + Elite Trainer Box
+          └── Extensions : toutes celles qui matchent
+                └── Articles : toutes les offres (langue, prix, quantité)
+
+"2 fois par jour" = 2 cycles complets de collecte (pas 2 requêtes HTTP).
 """
 
 import logging
@@ -17,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.cardmarket.com/ws/v2.0/output.json"
 
-# Produits ciblés (selon accord API)
-TARGET_CATEGORIES = ["Booster Box", "Elite Trainer Box"]
+POKEMON_GAME_ID = 3
+TARGET_PRODUCT_TYPES = {"Booster Box", "Elite Trainer Box"}
 
 
 class CardmarketClient:
@@ -30,50 +37,84 @@ class CardmarketClient:
             token_secret=settings.cm_access_token_secret,
         )
 
-    def _request(self, endpoint: str) -> dict[str, Any]:
+    def _get(self, endpoint: str, params: dict = None) -> dict[str, Any]:
         """
-        Appel HTTP GET avec retry exponentiel.
-        Respecte les rate limits via backoff sur 429/503.
+        Requête GET authentifiée avec retry exponentiel.
+        Gère les erreurs 429 (rate limit) et 503 (indisponibilité).
         """
         url = f"{BASE_URL}/{endpoint}"
         for attempt in range(settings.max_retries):
             try:
                 with httpx.Client(auth=self.auth, timeout=30) as client:
-                    response = client.get(url)
+                    response = client.get(url, params=params)
 
-                logger.info(f"GET {endpoint} → {response.status_code}")
+                logger.info(f"[{response.status_code}] GET /{endpoint}")
 
                 if response.status_code == 200:
                     return response.json()
 
                 if response.status_code in (429, 503):
                     wait = settings.retry_backoff ** attempt
-                    logger.warning(f"Rate limit ({response.status_code}), retry dans {wait}s")
+                    logger.warning(
+                        f"Rate limit {response.status_code} — "
+                        f"retry dans {wait:.0f}s (tentative {attempt + 1}/{settings.max_retries})"
+                    )
                     time.sleep(wait)
                     continue
 
                 response.raise_for_status()
 
-            except httpx.HTTPError as e:
-                logger.error(f"Erreur HTTP tentative {attempt + 1}: {e}")
+            except httpx.HTTPError as exc:
+                logger.error(f"Erreur HTTP tentative {attempt + 1}: {exc}")
                 if attempt < settings.max_retries - 1:
                     time.sleep(settings.retry_backoff ** attempt)
 
-        raise RuntimeError(f"Échec après {settings.max_retries} tentatives : {endpoint}")
+        raise RuntimeError(
+            f"Échec après {settings.max_retries} tentatives — endpoint: {endpoint}"
+        )
 
-    def get_expansions(self) -> list[dict]:
-        """Récupère toutes les extensions Pokémon disponibles."""
-        data = self._request("expansions/game/3")  # game 3 = Pokémon
-        return data.get("expansion", [])
+    def get_pokemon_expansions(self) -> list[dict]:
+        """
+        Retourne toutes les extensions du jeu Pokémon.
+        Endpoint : GET /expansions/game/{idGame}
+        """
+        data = self._get(f"expansions/game/{POKEMON_GAME_ID}")
+        expansions = data.get("expansion", [])
+        logger.info(f"{len(expansions)} extensions Pokémon récupérées")
+        return expansions
 
-    def get_products(self, expansion_id: int) -> list[dict]:
+    def get_sealed_products(self, expansion_id: int) -> list[dict]:
         """
-        Récupère les produits d'une extension.
-        Filtre uniquement Booster Box et Elite Trainer Box.
+        Retourne les produits scellés d'une extension,
+        filtrés sur Booster Box et Elite Trainer Box.
+
+        Endpoint : GET /expansions/{idExpansion}/products
+        Les produits scellés sont distincts des singles (cartes à l'unité).
         """
-        data = self._request(f"expansions/{expansion_id}/singles")
-        products = data.get("single", [])
-        return [
-            p for p in products
-            if any(cat in p.get("name", "") for cat in TARGET_CATEGORIES)
+        data = self._get(f"expansions/{expansion_id}/products")
+        all_products = data.get("product", [])
+
+        matched = [
+            p for p in all_products
+            if p.get("categoryName") in TARGET_PRODUCT_TYPES
         ]
+
+        if matched:
+            logger.debug(
+                f"Extension {expansion_id} → "
+                f"{len(matched)} produit(s) ciblé(s) sur {len(all_products)} total"
+            )
+        return matched
+
+    def get_product_articles(self, product_id: int) -> list[dict]:
+        """
+        Retourne TOUTES les offres actives d'un produit scellé.
+        Chaque offre contient : langue, prix, quantité disponible.
+
+        Endpoint : GET /products/{idProduct}/articles
+        C'est à ce niveau qu'on collecte les données de marché réelles.
+        """
+        data = self._get(f"products/{product_id}/articles")
+        articles = data.get("article", [])
+        logger.debug(f"Produit {product_id} → {len(articles)} offre(s)")
+        return articles

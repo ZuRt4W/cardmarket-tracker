@@ -1,7 +1,11 @@
 """
 processor/aggregator.py
-Transformation des données brutes en valeurs agrégées par langue.
-Calcule min, max et moyenne des prix.
+
+Transformation des articles bruts (offres Cardmarket) en valeurs agrégées.
+Reçoit la liste brute des articles d'un produit et calcule,
+par langue : prix minimum, maximum, moyenne et nombre d'offres.
+
+Les articles bruts ne sont jamais stockés — seul ce résultat agrégé est conservé.
 """
 
 from collections import defaultdict
@@ -14,42 +18,53 @@ SUPPORTED_LANGUAGES = {
 }
 
 
-def aggregate_prices(product: dict) -> Optional[dict[str, dict]]:
+def aggregate_articles(articles: list[dict]) -> Optional[dict[str, dict]]:
     """
-    À partir d'un produit brut retourné par l'API,
-    calcule min/max/moyenne des prix par langue.
+    Agrège une liste d'articles (offres) retournés par
+    GET /products/{idProduct}/articles.
 
-    Retourne None si aucune offre exploitable.
+    Structure d'un article Cardmarket :
+    {
+        "idArticle": 123,
+        "language": { "idLanguage": 1, "languageName": "French" },
+        "price": 89.99,
+        "count": 2,        # quantité disponible chez ce vendeur
+        ...
+    }
+
+    Retourne un dict par langue avec min/max/avg/count,
+    ou None si aucun article exploitable.
     """
-    offers = product.get("offers", [])
-    if not offers:
+    if not articles:
         return None
 
-    # Grouper les prix par langue
+    # Regrouper les prix par langue
     prices_by_lang: dict[str, list[float]] = defaultdict(list)
 
-    for offer in offers:
-        lang_id = offer.get("language", {}).get("idLanguage")
-        price = offer.get("price")
+    for article in articles:
+        lang_id = article.get("language", {}).get("idLanguage")
+        price = article.get("price")
 
-        if lang_id and price is not None:
-            lang_code = SUPPORTED_LANGUAGES.get(lang_id, f"lang_{lang_id}")
-            try:
-                prices_by_lang[lang_code].append(float(price))
-            except (ValueError, TypeError):
-                continue
+        if lang_id is None or price is None:
+            continue
+
+        lang_code = SUPPORTED_LANGUAGES.get(lang_id, f"lang_{lang_id}")
+        try:
+            prices_by_lang[lang_code].append(float(price))
+        except (ValueError, TypeError):
+            continue
 
     if not prices_by_lang:
         return None
 
-    # Agrégation : min / max / moyenne
+    # Calcul des agrégats par langue
     result = {}
     for lang, prices in prices_by_lang.items():
         result[lang] = {
             "min": round(min(prices), 2),
             "max": round(max(prices), 2),
             "avg": round(sum(prices) / len(prices), 2),
-            "count": len(prices),
+            "count": len(prices),  # nombre d'offres distinctes
         }
 
     return result
